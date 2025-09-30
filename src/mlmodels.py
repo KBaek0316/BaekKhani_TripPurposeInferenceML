@@ -207,6 +207,7 @@ class FNN(nn.Module): #inherits the class properties defined in nn.Module
             if self.doDropout:
                 x = self.dropout(x)
         x = self.output_layer(x)
+        x = F.softmax(x, dim=1)
         return x
 
 def doNN(x,y,testBool=None,hidden_sizes=[128,256],lrate=0.005,nEpoch=300, dropout_prob=0.2, weight_decay=0.001,plotErrors=False):
