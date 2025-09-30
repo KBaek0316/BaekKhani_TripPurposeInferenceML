@@ -50,17 +50,35 @@ This repository accompanies the academic paper **"Navigating Machine Learning fo
 ## Setup Requirements
 
 1.  **Python environment**
-    -   Python 3.9+ is recommended.
+    -   The workflow was validated on Python 3.12 via Conda. Create and activate a dedicated environment with the baseline dependencies:
 
-    -   Create a virtual environment and install dependencies:
-
-        ``` bash
-        python -m venv .venv
-        source .venv/bin/activate  # On Windows use `.venv\Scripts\activate`
-        pip install -r requirements.txt
-        ```
-
-        *If `requirements.txt` is not provided, manually install the libraries referenced in `src/mlmodels.py` and `src/preprocessing.py` (e.g., numpy, pandas, scikit-learn, optuna, xgboost, catboost, torch, haversine).*
+        ```bash
+        conda create -n your_env_name -c conda-forge --strict-channel-priority \
+            python=3.12 mamba numpy pandas scikit-learn=1.6.1 optuna catboost
+        conda activate your_env_name
+        ```	
+    -   After activating the environment, extend it based on your hardware profile:
+    
+            -   **CPU-only machine (no CUDA support)**
+    
+                ```bash
+                conda install py-xgboost-cpu pytorch cpuonly -c pytorch
+                ```
+    
+            -   **CUDA-capable GPU**
+    
+                ```bash
+                conda install pytorch==2.5.0 py-xgboost-gpu pytorch-cuda=12.4 -c pytorch -c nvidia
+                ```
+    
+            -   **RAPIDS (cuDF/cuML) workflow** *(requires Linux/WSL2 with a compatible NVIDIA GPU)*
+    
+                ```bash
+                mamba install -c rapidsai -c conda-forge -c nvidia \
+                    rapids=25.04 'cuda-version>=12.0,<=12.8' 'pytorch=*=*cuda*'
+                ```
+    
+        -   Run only the command group that matches your hardware; the CUDA and RAPIDS options are not needed on CPU-only machines. 
 2.  **Data placement**
     -   Place the dataset and key tables in the `data/` directory using the exact filenames shown above. The Optuna routines expect `data/dataIn.csv` to exist.
 3.  **GPU acceleration (optional)**
