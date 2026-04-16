@@ -17,7 +17,7 @@ else:
 os.chdir(WPATH)
 
 from src.preprocessing import getVars, inputGenerator
-from src.mlmodels import doRF, doXG, doSV, doNN, doCB
+from src.mlmodels import doRF, doXG, doSV, doNN, doCB, doLR
 
 import time
 import numpy as np
@@ -31,9 +31,18 @@ STORAGE_NAME='sqlite:///outputs/optunaStudies.db'
 NUMTRIALS_INIT=50
 NUMTRIALS_FINAL=110
 STUDYROUND=2
+
+#NEWVAR='caruse' #['caruse', 'rtinfo']
+try:
+    NEWVAR
+    YLAB=['notUsed','Used']
+except NameError:
+    NEWVAR='typeD'
+    YLAB=['W','Ed','Home','O','So','Sh','Work','Others','Home','Shop'] #first 6: round 1 remainings: round 2 from pd.factorize()
+
 trial_results=[] #not used in FE; just to avoid errors
 dataIn = pd.read_csv('data/dataIn.csv')
-opts, testBool, y, ylab, dfCombinations = getVars(dataIn,studyround=STUDYROUND) #,labelColName='typeD' implicit
+opts, testBool, y, ylab, dfCombinations = getVars(dataIn,studyround=STUDYROUND,labelColName=NEWVAR)
 #%% Feature Engineering Experiment Settings
 currentModel=input(f"Type a model to do Optuna studies from {dfCombinations.modelOpt.unique().tolist()} (case-insensitive): ").upper()
 if currentModel not in dfCombinations.modelOpt.unique():
@@ -48,7 +57,7 @@ try:
 except Exception:
     print('Initiating the exploration the first time')
 
-if currentModel=='XG' or currentModel=='CB':
+if currentModel in ['XG','CB','SV','xg','cb','sv']:
     TRYGPU=(input("Would you like to run this console with the GPU (CUDA) privilege if available? (y/n)").lower()=='y')
 
 if len(dfModel)>0:
@@ -66,8 +75,10 @@ else:
 def optim_score(results):
     if STUDYROUND==1:
         optimScore=(results['accuracy']+results['Home_f1-score']+results['W_f1-score'])/3-0.05*results['zeroPreds']
-    else:
+    elif NEWVAR=='typeD':
         optimScore=results['adj_accuracy'] #(results['Work_f1-score']+results['accuracy'])/2
+    else:
+        optimScore=results['accuracy'] #['Used_f1-score', 'accuracy']
     return optimScore
 
 def objective_NN(trial,x): #'trial' is Optuna convention; 'x' will be treated later with functools.partial
@@ -87,10 +98,14 @@ def objective_NN(trial,x): #'trial' is Optuna convention; 'x' will be treated la
                   lrate=lrate,
                   nEpoch=nEpoch,
                   dropout_prob=dropout_prob,
-                  weight_decay=weight_decay)
+                  weight_decay=weight_decay,
+                  ylab=YLAB)
     elapsed_time = time.time() - start_time
     trial_results.append(results)
-    trial.set_user_attr('WF1',results['Work_f1-score'])
+    if NEWVAR=='typeD':
+        trial.set_user_attr('WF1',results['Work_f1-score'])
+    else:
+        trial.set_user_attr('WF1',results['Used_f1-score'])
     trial.set_user_attr('ACC',results['accuracy'])
     print(f"Trial {trial.number} finished in {elapsed_time:.2f} seconds (current dfModel row: {row.Index})")
     return optim_score(results)
@@ -106,7 +121,7 @@ def objective_RF(trial,x): #'trial' is Optuna convention
         'max_samples': trial.suggest_float('max_samples', 0.6, 1.0)
     }
     try:
-        results = doRF(x,y,testBool=testBool,paramsIn=params)
+        results = doRF(x,y,testBool=testBool,paramsIn=params,ylab=YLAB)
     except Exception as e:
         if "cudaErrorMemoryAllocation" in str(e):
             raise optuna.exceptions.TrialPruned()
@@ -114,7 +129,10 @@ def objective_RF(trial,x): #'trial' is Optuna convention
             raise e
     elapsed_time = time.time() - start_time
     trial_results.append(results)
-    trial.set_user_attr('WF1',results['Work_f1-score'])
+    if NEWVAR=='typeD':
+        trial.set_user_attr('WF1',results['Work_f1-score'])
+    else:
+        trial.set_user_attr('WF1',results['Used_f1-score'])
     trial.set_user_attr('ACC',results['accuracy'])
     print(f"Trial {trial.number} finished in {elapsed_time:.2f} seconds (current dfModel row: {row.Index})")
     return optim_score(results)
@@ -131,7 +149,7 @@ def objective_XG(trial,x):
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),  # Column sampling
     }
     try:
-        results = doXG(x,y,testBool=testBool,paramsIn=params,tryGPU=TRYGPU)
+        results = doXG(x,y,testBool=testBool,paramsIn=params,tryGPU=TRYGPU,ylab=YLAB)
     except Exception as e:
         if "cudaErrorMemoryAllocation" in str(e):
             raise optuna.exceptions.TrialPruned()
@@ -139,7 +157,10 @@ def objective_XG(trial,x):
             raise e
     elapsed_time = time.time() - start_time
     trial_results.append(results)
-    trial.set_user_attr('WF1',results['Work_f1-score'])
+    if NEWVAR=='typeD':
+        trial.set_user_attr('WF1',results['Work_f1-score'])
+    else:
+        trial.set_user_attr('WF1',results['Used_f1-score'])
     trial.set_user_attr('ACC',results['accuracy'])
     print(f"Trial {trial.number} finished in {elapsed_time:.2f} seconds (current dfModel row: {row.Index})")
     return optim_score(results)
@@ -158,10 +179,22 @@ def objective_SV(trial,x):
             params['degree'] = trial.suggest_int('degree', 2, 4)
             params['coef0'] = trial.suggest_float('coef0', -0.5, 0.5)
     #print(f"[Trial {trial.number}] STARTING with params: {params}")
-    results = doSV(x,y,testBool=testBool, paramsIn=params)
+    try:
+        results = doSV(x, y, testBool=testBool, paramsIn=params,tryGPU=TRYGPU,ylab=YLAB)
+    except Exception as e:
+        error_msg = str(e).lower()
+        # Catch cuML/CUDA memory errors and internal cuML algorithmic crashes
+        if any(phrase in error_msg for phrase in ["memory", "working set has already been initialized"]):
+            print(f"Trial {trial.number} pruned due to GPU limits or cuML solver instability.")
+            raise optuna.exceptions.TrialPruned()
+        else:
+            raise e # Raise other unexpected errors so you can debug them
     elapsed_time = time.time() - start_time
     trial_results.append(results)
-    trial.set_user_attr('WF1',results['Work_f1-score'])
+    if NEWVAR=='typeD':
+        trial.set_user_attr('WF1',results['Work_f1-score'])
+    else:
+        trial.set_user_attr('WF1',results['Used_f1-score'])
     trial.set_user_attr('ACC',results['accuracy'])
     print(f"Trial {trial.number} finished in {elapsed_time:.2f} seconds (current dfModel row: {row.Index})")
     gc.collect()
@@ -179,11 +212,33 @@ def objective_CB(trial,x):
         #'border_count': trial.suggest_int('border_count', 32, 128),  # Deprecated, more related to computation speed than accuracy
         'auto_class_weights': trial.suggest_categorical('auto_class_weights', [None, 'Balanced', 'SqrtBalanced'])  # For imbalanced datasets
     }
-    results = doCB(x,y,cat_features=cat_features,testBool=testBool,paramsIn=params,tryGPU=TRYGPU)
+    results = doCB(x,y,cat_features=cat_features,testBool=testBool,paramsIn=params,tryGPU=TRYGPU,ylab=YLAB)
     elapsed_time = time.time() - start_time
     trial_results.append(results)
-    trial.set_user_attr('WF1',results['Work_f1-score'])
+    if NEWVAR=='typeD':
+        trial.set_user_attr('WF1',results['Work_f1-score'])
+    else:
+        trial.set_user_attr('WF1',results['Used_f1-score'])
     trial.set_user_attr('ACC',results['accuracy'])
+    print(f"Trial {trial.number} finished in {elapsed_time:.2f} seconds (current dfModel row: {row.Index})")
+    return optim_score(results)
+
+def objective_LR(trial, x):
+    start_time = time.time()
+    params = {
+        'C': trial.suggest_float('C', 1e-4, 1e4, log=True),
+        'penalty': trial.suggest_categorical('penalty', ['l1', 'l2']),
+        'class_weight': trial.suggest_categorical('class_weight', [None, 'balanced'])
+    }
+    # doLR handles the 'saga' solver default and cuML switching under the hood
+    results = doLR(x, y, testBool=testBool, paramsIn=params,ylab=YLAB)
+    elapsed_time = time.time() - start_time
+    trial_results.append(results)
+    if NEWVAR=='typeD':
+        trial.set_user_attr('WF1',results['Work_f1-score'])
+    else:
+        trial.set_user_attr('WF1',results['Used_f1-score'])
+    trial.set_user_attr('ACC', results['accuracy'])
     print(f"Trial {trial.number} finished in {elapsed_time:.2f} seconds (current dfModel row: {row.Index})")
     return optim_score(results)
 
@@ -193,14 +248,15 @@ objective_functions = {
     "XG": objective_XG,
     "CB": objective_CB,
     "NN": objective_NN,
-    "SV": objective_SV
+    "SV": objective_SV,
+    "LR": objective_LR
 }
 #NUMTRIALS_INIT=6
 #%% Feature Engineering (FE) Exploration with the given model input
 for row in dfModel.itertuples(): #dataset loop: nest this line when finished
     paramsIn={k: v for k, v in row._asdict().items() if k not in ['Index','globalInd','modelOpt']}
     paramsIn['opt']=opts[paramsIn['opt']]
-    x, xlab, currentOpt = inputGenerator(dfRaw=dataIn,**paramsIn,studyround=STUDYROUND)
+    x, xlab, currentOpt = inputGenerator(dfRaw=dataIn,**paramsIn,studyround=STUDYROUND,labelColName=NEWVAR)
     currentObj = partial(objective_functions[currentModel], x=x) #obtuna only accepts "trial" so have to freeze x
     hpStudy = optuna.create_study(study_name=f'temp_{currentModel}_{row.Index}',storage=STORAGE_NAME,load_if_exists=True,direction='maximize')
     if len(hpStudy.trials)<NUMTRIALS_INIT:
@@ -245,7 +301,7 @@ if '__file__' in globals():
 print([summary.study_name for summary in optuna.get_all_study_summaries(storage=STORAGE_NAME)])
 freshStart=False
 #main loop
-for currentModel in objective_functions.keys(): #['SV','RF','XG','CB','NN'] or objective_functions.keys()
+for currentModel in objective_functions.keys(): #['SV','RF','XG','CB','NN','LR'] or objective_functions.keys()
     print(f'{"Hyperparameter exploration for model "+str(currentModel):*^80}')
     dfFE=pd.read_csv('outputs/'+currentModel+'Tuning.csv',index_col="Index")
     optcols=np.intersect1d(dfFE.columns,['opt','timeOpt','locOpt','catOpt','encDim','denom'])

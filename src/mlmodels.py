@@ -8,6 +8,7 @@ import os
 import numpy as np
 import pandas as pd
 from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
 import xgboost as xgb
@@ -16,6 +17,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import gc
 
 _PRINTED_SETUP = False
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
@@ -37,17 +39,24 @@ if __name__=='__main__':
             WPATH=os.path.abspath('C:/git/Trip-Chaining-and-Machine-Learning-Inference/MLTraining')
     os.chdir(WPATH)
 
-if os.name=='posix' and os.getenv('USER')=='sh222': #if run on WSL2-CUML compatible
-    import cudf
-    from cuml.ensemble import RandomForestClassifier as cuRF
-    from cuml.svm import SVC as cuSVC
-    USECUML=True
+if os.name=='posix':
+    try:
+        import cudf
+        from cuml.ensemble import RandomForestClassifier as cuRF
+        from cuml.svm import SVC as cuSVC
+        from cuml.linear_model import LogisticRegression as cuLR
+        USECUML=True
+    except ModuleNotFoundError:
+        USECUML=False
+        print('CUML not installed')
 
-def modelResults(yraw,yhat,modelName='',ylab=YLAB):
+def modelResults(yraw,yhat,modelName='',ylab=None):
+    if ylab is None:
+        ylab=['W','Ed','Home','O','So','Sh','Work','Others','Home','Shop']
     print(f"Classification Report for {modelName}:")
     if yraw.max()==5: #detect if round 1
         ylab=ylab[:6]
-    else: #round 2
+    elif yraw.max()==3: #round 2
         ylab=ylab[6:]
     print(classification_report(yraw, yhat, target_names=ylab,digits=3, zero_division=np.nan))
     report=classification_report(yraw, yhat, target_names=ylab,digits=4, output_dict=True, zero_division=0)
@@ -83,7 +92,7 @@ def threadAllocation(deviceUsing='CpU'): #for Catboost and XGBoost; for NN, alwa
     return threadCount
 
 
-def doRF(x,y,testBool=None,nTrees=200, paramsIn:dict=None):
+def doRF(x,y,testBool=None,nTrees=200, paramsIn:dict=None, ylab=None):
     clf_func = RandomForestClassifier # Default to sklearn's RandomForest
     if USECUML:
         paramsIn['n_streams']=1
@@ -111,9 +120,41 @@ def doRF(x,y,testBool=None,nTrees=200, paramsIn:dict=None):
         if USECUML:
             y_ts=y_ts.to_numpy()
             yhat_ts=yhat_ts.to_numpy()
-        return modelResults(y_ts,yhat_ts,'RF')
+        return modelResults(y_ts,yhat_ts,'RF',ylab=ylab)
 
-def doXG(x,y,testBool=None,nTrees=200,tryGPU=True,paramsIn:dict=None):
+def doLR(x, y, testBool=None, maxIt=3000, paramsIn: dict = None, ylab=None):
+    clf_func = LogisticRegression 
+    if USECUML: #cuML default qn works both for L1 and L2
+        x = cudf.DataFrame.from_records(x) 
+        y = cudf.Series(y) 
+        clf_func = cuLR 
+        solv='qn'
+        print('Using cuML')
+    else: # sklearn non-default saga works both for L1 and L2
+        solv= 'saga'
+    if testBool is not None:
+        x_ts=x[testBool]
+        y_ts=y[testBool]
+        x=x[~testBool]
+        y=y[~testBool]
+    if paramsIn is None:
+        lr_classifier=clf_func(max_iter=maxIt,solver=solv)
+    else:
+        lr_classifier=clf_func(**paramsIn,max_iter=maxIt,solver=solv)
+    lr_classifier.fit(x, y)
+    yhat = lr_classifier.predict(x)
+    if testBool is None:
+        if USECUML:
+            yhat = yhat.to_numpy()
+        return lr_classifier, yhat
+    else:
+        yhat_ts = lr_classifier.predict(x_ts)
+        if USECUML:
+            y_ts = y_ts.to_numpy()
+            yhat_ts = yhat_ts.to_numpy()
+        return modelResults(y_ts, yhat_ts, 'LR',ylab=ylab)
+
+def doXG(x,y,testBool=None,nTrees=200,tryGPU=True,paramsIn:dict=None,ylab=None):
     XGDevice = 'cuda' if torch.cuda.is_available() and tryGPU else 'cpu'
     threadCount=threadAllocation(XGDevice)
     if testBool is not None:
@@ -133,14 +174,14 @@ def doXG(x,y,testBool=None,nTrees=200,tryGPU=True,paramsIn:dict=None):
         return xg_classifier, yhat
     else:
         yhat_ts = xg_classifier.predict(x_ts)
-        return modelResults(y_ts,yhat_ts,'XG')
+        return modelResults(y_ts,yhat_ts,'XG',ylab=ylab)
 
-def doSV(x, y,testBool=None, kernel='linear', paramsIn:dict=None):
+def doSV(x, y,testBool=None, kernel='linear',tryGPU=False,paramsIn:dict=None,ylab=None):
     clf_func=SVC
-    doCUML=((USECUML) and (paramsIn is not None) and (paramsIn['kernel']!='linear'))
+    doCUML=((USECUML) and (paramsIn is not None) and (paramsIn['kernel']!='linear') and (tryGPU))
     if doCUML:
-        x=cudf.DataFrame.from_records(x)
-        y=cudf.Series(y)
+        x = cudf.DataFrame.from_records(x.astype(np.float32))
+        y = cudf.Series(y.astype(np.float32))
         clf_func=cuSVC
         print ('Using cuML')
     if testBool is not None:
@@ -153,20 +194,27 @@ def doSV(x, y,testBool=None, kernel='linear', paramsIn:dict=None):
     else:
         clf = clf_func(**paramsIn,random_state=5723588)
     #clf=clf_func(kernel='poly',C=1,class_weight='balanced',degree=3,coef0=0.1,gamma=0.9,random_state=5723588)
-    clf.fit(x, y)
-    yhat = clf.predict(x)
     if testBool is None:
+        clf.fit(x, y)
+        yhat = clf.predict(x)
         if doCUML:
             yhat=yhat.to_numpy()
         return clf, yhat
     else:
-        yhat_ts = clf.predict(x_ts)
-        if doCUML:
-            y_ts=y_ts.to_numpy()
-            yhat_ts=yhat_ts.to_numpy()
-        return modelResults(y_ts,yhat_ts,'SV')
+        try:
+            clf.fit(x, y)
+            yhat_ts = clf.predict(x_ts)
+            if doCUML:
+                y_ts=y_ts.to_numpy()
+                yhat_ts=yhat_ts.to_numpy()
+            res = modelResults(y_ts, yhat_ts, 'SV', ylab=ylab)
+        finally:
+            if doCUML:
+                del clf
+                gc.collect()
+        return res
 
-def doCB(x,y,testBool=None,nTrees=300,cat_features=[],tryGPU=True,paramsIn:dict=None):
+def doCB(x,y,testBool=None,nTrees=300,cat_features=[],tryGPU=True,paramsIn:dict=None,ylab=None):
     CBDevice = 'GPU' if torch.cuda.is_available() and tryGPU else 'CPU'
     threadCount=threadAllocation(CBDevice)
     if testBool is not None:
@@ -181,12 +229,16 @@ def doCB(x,y,testBool=None,nTrees=300,cat_features=[],tryGPU=True,paramsIn:dict=
         cb_classifier = CatBoostClassifier(**paramsIn,cat_features=cat_features,thread_count=threadCount,
                                            task_type=CBDevice,verbose=False,random_seed=5723588)
     cb_classifier.fit(x, y,early_stopping_rounds=35, verbose=300)
-    yhat = cb_classifier.predict(x)[:,0]
+    yhat = cb_classifier.predict(x)
+    if yhat.ndim==2:
+        yhat=yhat[:,0]
     if testBool is None:
         return cb_classifier, yhat
     else:
-        yhat_ts = cb_classifier.predict(x_ts)[:,0]
-        return modelResults(y_ts,yhat_ts,'CB')
+        yhat_ts = cb_classifier.predict(x_ts)
+        if yhat_ts.ndim==2:
+            yhat_ts=yhat_ts[:,0]
+        return modelResults(y_ts,yhat_ts,'CB',ylab=ylab)
 
 class FNN(nn.Module): #inherits the class properties defined in nn.Module
     def __init__(self, input_size, output_size, hidden_sizes,dropout_prob):
@@ -210,7 +262,8 @@ class FNN(nn.Module): #inherits the class properties defined in nn.Module
         x = F.softmax(x, dim=1)
         return x
 
-def doNN(x,y,testBool=None,hidden_sizes=[128,256],lrate=0.005,nEpoch=300, dropout_prob=0.2, weight_decay=0.001,plotErrors=False):
+def doNN(x,y,testBool=None,hidden_sizes=[128,256],lrate=0.005,nEpoch=300, dropout_prob=0.2, weight_decay=0.001,plotErrors=False,ylab=['W','Ed','Home','O','So','Sh','Work','Others','Home','Shop']):
+    device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
     if testBool is not None:
         x_ts=torch.tensor(x[testBool],dtype=torch.float32).to(device)
         y_ts=torch.tensor(y[testBool],dtype=torch.long).to(device)
@@ -263,7 +316,7 @@ def doNN(x,y,testBool=None,hidden_sizes=[128,256],lrate=0.005,nEpoch=300, dropou
         with torch.no_grad():
             outputs = model(x_ts)
             _, yhat = torch.max(outputs, 1)
-            return modelResults(y_ts.cpu().numpy(),yhat.cpu().numpy(),'NN')
+            return modelResults(y_ts.cpu().numpy(),yhat.cpu().numpy(),'NN',ylab=ylab)
 
 #%% test
 if __name__=='__main__':
@@ -285,13 +338,22 @@ if __name__=='__main__':
     modelOut, yhat=doXG(x,y) #when not
     outs=modelResults(y,yhat,modelName='XG')
     #round 2
-    opts2, testBool2, y2, ylab2, dfCombinations2 = getVars(dataIn,studyround=2)
-    for row2 in dfCombinations2.iloc[827:829,:].itertuples(): #extract example row
+    for row2 in dfCombinations2.iloc[1150:1151,:].itertuples(): #extract example row
         x2, xlab2, currentOpt2 = inputGenerator(dfRaw=dataIn,opt=opts2[row2.opt],timeOpt=row2.timeOpt,locOpt=row2.locOpt,
                                                 catOpt=row2.catOpt,encDim=row2.encDim,denom=row2.denom,studyround=2)
         doNN(x2,y2,testBool2)
         modelOut2, yhat2=doNN(x2,y2)
         outs2=modelResults(y2,yhat2,modelName='NN')
+    #additional
+    NEWVAR='caruse'
+    ylab3=['notUsed','Used']
+    opts3, testBool3, y3, ylab3, dfCombinations3 = getVars(dataIn,studyround=2,labelColName=NEWVAR)
+    for row3 in dfCombinations3.iloc[89:91,:].itertuples(): #extract example row
+        x3, xlab3, currentOpt3 = inputGenerator(dfRaw=dataIn,opt=opts3[row3.opt],timeOpt=row3.timeOpt,locOpt=row3.locOpt,
+                                                catOpt=row3.catOpt,encDim=row3.encDim,denom=row3.denom,studyround=2,labelColName=NEWVAR)
+        doXG(x3,y3,testBool3,ylab=ylab3)
+        modelOut3, yhat3=doXG(x3,y3,ylab=ylab3)
+        outs3=modelResults(y3,yhat3,modelName='LR',ylab=ylab3)
 elif not _PRINTED_SETUP: #message shown upon import, but only once
     print('mlmodels.py imported')
     _PRINTED_SETUP = True

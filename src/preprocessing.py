@@ -17,7 +17,7 @@ random.seed(5723588)
 np.random.seed(5723588)
 
 _PRINTED_SETUP = False
-LABELNAME='typeD'
+LABELNAME='typeD' #['typeD', 'caruse']
 OPTDICT = {
     'month': {
         '4seasons': {1: 3, 2: 3, 3: 3, 4: 0, 5: 0, 6: 1, 7: 1, 8: 1, 9: 2, 10: 2, 11: 2, 12: 3},
@@ -37,7 +37,7 @@ OPTDICT = {
 TIMEOPTS = ['raw', 'addDur', 'cyclic', '1dpos']
 LOCOPTS = ['raw', 'zone', '2dpos', 'polar', 'elliptic']
 CATOPTS = ['onehot','WTE','5FTE']
-MODELOPTS = ['SV','RF','XG','CB','NN'] #order: ['SV','RF','XG','CB','NN']
+MODELOPTS = ['SV','RF','XG','CB','NN','LR'] #order: ['SV','RF','XG','CB','NN','LR']
 
 if __name__=='__main__':
     if '__file__' in globals():
@@ -62,15 +62,18 @@ def getVars(dfRaw,optDict:dict=OPTDICT,timeOpts:list=TIMEOPTS,locOpts: list = LO
     dfRaw=dfRaw.copy()
     if optDict is None:
         raise ValueError("OPTDICT must be provided! visit preprocessing.py for the default OPTDICT")
-    if studyround==2:
+    if studyround>1:
         newlabel=np.full(len(dfRaw),'Others')
         newlabel[dfRaw[LABELNAME]=='Home']='Home'
         newlabel[dfRaw[LABELNAME]=='W']='Work'
         newlabel[dfRaw[LABELNAME]=='Sh']='Shop'
         #newlabel[dfRaw[LABELNAME].isin(['Sh','So'])]='Leis'
-        dfRaw[LABELNAME]=newlabel
+        if labelColName!='typeD':
+            newlabel=np.full(len(dfRaw),'notUsed')
+            newlabel[dfRaw[labelColName]==1]='Used'
+        dfRaw[labelColName]=newlabel
     _, testInd = train_test_split(dfRaw.index, stratify=dfRaw[labelColName])
-    y, ylab = pd.factorize(dfRaw[LABELNAME])
+    y, ylab = pd.factorize(dfRaw[labelColName])
     testBool=np.isin(np.arange(len(y)), testInd)
     opts = [dict(zip(optDict.keys(), combination)) for combination in product(*[list(d.keys()) for d in optDict.values()])]
     if studyround==2:
@@ -80,6 +83,8 @@ def getVars(dfRaw,optDict:dict=OPTDICT,timeOpts:list=TIMEOPTS,locOpts: list = LO
     if studyround==2:
         dfCombinations=dfCombinations.loc[dfCombinations.timeOpt!='addDur',:]
         encdf=pd.DataFrame(list(product([8,16,24], [2500,5000,10000])), columns=['encDim', 'denom'])
+        if labelColName!='typeD':
+            encdf=pd.DataFrame(list(product([16], [5000])), columns=['encDim', 'denom'])
         dfCombinationsPE=pd.merge(dfCombinations.loc[dfCombinations.locOpt=='2dpos',:],encdf,how='cross')
         dfCombinations=pd.concat([dfCombinations.loc[dfCombinations.locOpt!='2dpos',:],dfCombinationsPE],ignore_index=True)
         dfCombinations[['encDim', 'denom']] = dfCombinations[['encDim', 'denom']].astype('Int64') #Int64 can handle NA
@@ -233,7 +238,6 @@ def elliptic(lat_col, lon_col, prefix='', f1_lat=44.97731, f1_lon=-93.26561, f2_
 def coordplots(df,c_system='Cartesian',labs=None,borders=None):
     '''
     df=dataIn.copy()
-    labs=ylab2
     c_system='Elliptic'
     borders='borders.geojson'
     labs={'Sh':'Shopping','O':'Others','So':'Others','Ed':'Others','Home':'Home','W':'Work'}
@@ -287,27 +291,33 @@ def coordplots(df,c_system='Cartesian',labs=None,borders=None):
         if c_system == 'Cartesian':
             ax.legend(title="Location Type", loc="best")
     else:
-        dfConcat=dfDes.copy()
+        dfConcat=dfDes.copy().sample(frac=0.2, random_state=42)
         dfConcat.columns=colnames
         dfConcat['DestinationType']=df['DestinationType']
         cmap = plt.get_cmap("tab10")
         categories = list(dict.fromkeys(labs.values()))
+        markers = ['o', 's', '^', 'D', 'v', '*']
         for i, category in enumerate(categories):
             subset = dfConcat[dfConcat["DestinationType"] == category]
-            ax.scatter(subset[colnames[0]], subset[colnames[1]],label=category,color=cmap(i),s=6,alpha=0.15,zorder=10 + i)
+            ax.scatter(subset[colnames[0]], subset[colnames[1]], label=category, color=cmap(i),
+                       marker=markers[i % len(markers)], s=10, alpha=0.5, zorder=10 + i, edgecolors='none')
         if c_system == 'Cartesian':
-            ax.legend(title="Destination\nPlace Type", loc="best")
+            leg = ax.legend(title="Destination\nPlace Type", loc="best")
+            legend_handles = getattr(leg, 'legend_handles', getattr(leg, 'legendHandles', []))
+            for lh in legend_handles:
+                lh.set_alpha(1.0)
     plt.tight_layout()
     plt.show()
     return None
 
 '''for debugging
 dataIn = pd.read_csv(r'data/dataIn.csv')
-opts, testBool, y, ylab, dfCombinations = getVars(dataIn,OPTDICT,studyround=2)
+opts, testBool, y, ylab, dfCombinations = getVars(dataIn,OPTDICT,studyround=2) #,labelColName='caruse'
 dfRaw, opt, timeOpt, locOpt, catOpt, encDim, denom, studyround= (dataIn, opts[0],'1dpos', '2dpos' ,'5FTE', 4, 1000, 2)
+#labelColName='caruse'
 '''
 
-def inputGenerator(dfRaw,opt,timeOpt='raw',locOpt='2dpos',catOpt='onehot',encDim=4,denom=1000,studyround=1):
+def inputGenerator(dfRaw,opt,timeOpt='raw',locOpt='2dpos',catOpt='onehot',encDim=4,denom=1000,studyround=1,labelColName=LABELNAME):
     opt=opt.copy()
     dfConverted=dfRaw.copy()
     if studyround==2:
@@ -316,7 +326,12 @@ def inputGenerator(dfRaw,opt,timeOpt='raw',locOpt='2dpos',catOpt='onehot',encDim
         newlabel[dfConverted[LABELNAME]=='W']='Work'
         newlabel[dfConverted[LABELNAME]=='Sh']='Shop'
         #newlabel[dfConverted[LABELNAME].isin(['Sh','So'])]='Leis'
-        dfConverted[LABELNAME]=newlabel
+        if labelColName!='typeD':
+            newlabel=np.full(len(dfConverted),'notUsed')
+            newlabel[dfRaw[labelColName]==1]='Used'
+        dfConverted[labelColName]=newlabel
+    if studyround!=3: #when NOT applying trained models to AFC
+        label, lab= pd.factorize(dfConverted[labelColName])
     if studyround!=3: #when applying trained models to AFC
         label, lab= pd.factorize(dfConverted[LABELNAME])
         label_series = pd.Series(label)
@@ -324,7 +339,7 @@ def inputGenerator(dfRaw,opt,timeOpt='raw',locOpt='2dpos',catOpt='onehot',encDim
         label, lab=0,0
     scaler=StandardScaler()
     addedCols=[]
-    delCols=['sid','aid','routes',LABELNAME,'tr']
+    delCols=['sid','aid','routes','tr','typeD','caruse']
     stdCols=['nwDist','eucDist']
     catCols=list(opt.keys())
     alpha=5
@@ -489,16 +504,21 @@ if __name__=='__main__':
     elliptic(dataIn.DesLat,dataIn.DesLon,'des')
     #round 1
     opts, testBool, y, ylab, dfCombinations = getVars(dataIn,OPTDICT)
-    dfCombinations.to_csv(r'data/study1keys.csv',index_label='globalInd') #order: ['SV','RF','XG','CB','NN']
+    dfCombinations.to_csv(r'data/study1keys.csv',index_label='globalInd') #order: ['SV','RF','XG','CB','NN','LR']
     dfConverted, xlab, opt=inputGenerator(dataIn,opts[0],'raw','zone','catboost')
     #round 2
     opts2, testBool2, y2, ylab2, dfCombinations2 = getVars(dataIn,OPTDICT,studyround=2)
-    dfCombinations2.to_csv(r'data/study2keys.csv',index_label='globalInd') #order: ['SV','RF','XG','CB','NN']
+    dfCombinations2.to_csv(r'data/study2keys.csv',index_label='globalInd') #order: ['SV','RF','XG','CB','NN','LR']
     dfConverted2, xlab2, opt2=inputGenerator(dataIn,opts2[0],'raw','2dpos','WTE',6,10000,studyround=2) #WTE 5FTE
     #plots
     coordplots(dataIn,'Cartesian')
     coordplots(dataIn,'Polar')
     coordplots(dataIn,'Elliptic')
+    #Appendix (caruse)
+    NEWVAR='caruse'
+    opts2, testBool2, y2, ylab2, dfCombinations2 = getVars(dataIn,OPTDICT,studyround=2,labelColName=NEWVAR)
+    dfCombinations2.to_csv(r'data/study9keys.csv',index_label='globalInd')
+    dfConverted2, xlab2, opt2=inputGenerator(dataIn,opts2[0],'raw','2dpos','WTE',6,10000,studyround=2,labelColName=NEWVAR)
 elif not _PRINTED_SETUP: #message shown upon import, but only once
     print('preprocessing.py imported; Setup:')
     print(f'  (1) Dependent variable or label column is set to: {LABELNAME}')
